@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Desktop Assistant</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent; /* important: lets the desktop show through */
+        font-family: system-ui, sans-serif;
+      }
+      #scene {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      #ui {
+        position: absolute;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #bubble {
+        display: none;
+        max-height: 110px;
+        overflow-y: auto;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(20, 20, 28, 0.85);
+        color: #f2f2f2;
+        font-size: 13px;
+        line-height: 1.4;
+      }
+      #row {
+        display: flex;
+        gap: 6px;
+      }
+      #input {
+        flex: 1;
+        padding: 8px 10px;
+        border: none;
+        outline: none;
+        border-radius: 10px;
+        background: rgba(20, 20, 28, 0.85);
+        color: #fff;
+        font-size: 13px;
+      }
+      #input::placeholder {
+        color: #9aa;
+      }
+      #quit {
+        width: 34px;
+        border: none;
+        border-radius: 10px;
+        background: rgba(120, 30, 30, 0.85);
+        color: #fff;
+        cursor: pointer;
+      }
+    </style>
+
+    <!-- Tells the browser where to find "three" and "@pixiv/three-vrm" (installed by npm) -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./node_modules/three/build/three.module.js",
+          "three/addons/": "./node_modules/three/examples/jsm/",
+          "three/examples/jsm/": "./node_modules/three/examples/jsm/",
+          "@pixiv/three-vrm": "./node_modules/@pixiv/three-vrm/lib/three-vrm.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <canvas id="scene"></canvas>
+
+    <div id="ui">
+      <div id="bubble"></div>
+      <div id="row">
+        <input id="input" type="text" placeholder="Talk to me..." autocomplete="off" />
+        <button id="quit" title="Quit (Ctrl+Shift+Q)">✕</button>
+      </div>
+    </div>
+
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>

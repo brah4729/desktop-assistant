@@ -1,0 +1,15 @@
+{
+  "name": "desktop-assistant",
+  "version": "0.1.0",
+  "description": "Always-on-top VRM desktop assistant powered by a local LLM (Ollama)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@pixiv/three-vrm": "^3.5.5",
+    "electron": "^44.7.0",
+    "three": "^0.186.1"
+  }
+}
