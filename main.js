@@ -1,7 +1,7 @@
 // main.js - Electron main process
 // Creates a transparent, frameless, always-on-top window and talks to Ollama.
 
-const { app, BrowserWindow, screen, ipcMain, protocol, net, globalShortcut } = require("electron");
+const { app, BrowserWindow, screen, ipcMain, protocol, net, globalShortcut, session } = require("electron");
 const path = require("path");
 const { pathToFileURL } = require("url");
 
@@ -13,10 +13,16 @@ const TTS_MODEL = process.env.TTS_MODEL || "tts-1"; // "tts-1" = the engine that
 const TTS_VOICE = process.env.TTS_VOICE || "d0510de3"; // voice profile ID from VoiceStudio ; "default" = the engine's own voice
 const TTS_LANGUAGE = process.env.TTS_LANGUAGE || ""; // e.g. "en" or "id"; empty = let the engine decide
 const TTS_TIMEOUT_MS = 120000; // CPU speech can be slow, and the first call also loads the model
-const WINDOW_WIDTH = 400;
-const WINDOW_HEIGHT = 640;
-const MIN_ZOOM = 0.5; // smallest size when you scroll (1 = the window size above). Smaller makes the text unreadable
-const ZOOM_SPEED = 0.001; // how much one step of the mouse wheel resizes the avatar
+const STT_MODEL = process.env.STT_MODEL || "whisper-1"; // "whisper-1" = the speech recognition engine that is active in VoiceStudio
+const STT_LANGUAGE = process.env.STT_LANGUAGE || "en"; // the language you speak, e.g. "en" or "id"; "auto" = let the engine guess
+const STT_TIMEOUT_MS = 60000;
+// Works from any app: press once to start talking, again to stop. If you change it, also change the hint on the
+// microphone button in index.html. Ctrl+Shift+Space was already taken by another app on this machine.
+const TALK_SHORTCUT = "Alt+Shift+Space";
+// The window is invisible and never changes size. It only has to be big enough for the avatar at its biggest zoom
+// (the zoom itself is in renderer.js). The height is cut to the screen when the screen is smaller.
+const WINDOW_WIDTH = 540;
+const WINDOW_HEIGHT = 820;
 // ---------------------------------------------
 
 // Let the page play the TTS audio even when no key or click came right before it
@@ -32,13 +38,15 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 function createWindow() {
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+  const area = screen.getPrimaryDisplay().workArea;
+  windowSize = { width: WINDOW_WIDTH, height: Math.min(WINDOW_HEIGHT, area.height) };
 
+  // Bottom right corner of the screen
   const win = new BrowserWindow({
-    width: WINDOW_WIDTH,
-    height: WINDOW_HEIGHT,
-    x: width - WINDOW_WIDTH,
-    y: height - WINDOW_HEIGHT,
+    width: windowSize.width,
+    height: windowSize.height,
+    x: area.x + area.width - windowSize.width,
+    y: area.y + area.height - windowSize.height,
     transparent: true, // see-through background
     frame: false, // no title bar or border
     alwaysOnTop: true, // float above other windows
@@ -58,10 +66,11 @@ function createWindow() {
   // Start click-through; the page turns this off while the mouse is over the avatar or the UI
   win.setIgnoreMouseEvents(true, { forward: true });
 
-  // Chromium can remember the page zoom of an earlier run, so set ours again on every load
-  win.webContents.on("did-finish-load", () => win.webContents.setZoomFactor(zoom));
+  // Chromium can remember a page zoom from an earlier run. The page must always be at 100%
+  win.webContents.on("did-finish-load", () => win.webContents.setZoomFactor(1));
 
   win.loadURL("app://local/index.html");
+  return win;
 }
 
 app.whenReady().then(() => {
@@ -78,10 +87,23 @@ app.whenReady().then(() => {
     return net.fetch(pathToFileURL(filePath).toString());
   });
 
-  createWindow();
+  // The page may use the microphone (push-to-talk). Every other permission request is refused
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    const wantsVideo = (details.mediaTypes || []).includes("video");
+    callback(permission === "media" && !wantsVideo);
+  });
+
+  const win = createWindow();
 
   // Emergency exit, because this window has no title bar:  Ctrl + Shift + Q
   globalShortcut.register("CommandOrControl+Shift+Q", () => app.quit());
+
+  // Talk without clicking the window first. A global shortcut only reports the key press, not the release,
+  // so it cannot be "hold to talk": the page starts on the first press and stops on the second.
+  const registered = globalShortcut.register(TALK_SHORTCUT, () => {
+    if (!win.isDestroyed()) win.webContents.send("talk-toggle");
+  });
+  if (!registered) console.warn(`Could not register the talk shortcut ${TALK_SHORTCUT} (another app uses it).`);
 });
 
 app.on("will-quit", () => globalShortcut.unregisterAll());
@@ -95,14 +117,10 @@ ipcMain.on("set-ignore", (event, ignore) => {
 
 ipcMain.on("quit", () => app.quit());
 
-// ---------- Drag and zoom ----------
-// The avatar never moves inside the page. To move or resize it, we move or resize the whole window.
-let zoom = 1; // 1 = WINDOW_WIDTH x WINDOW_HEIGHT
+// ---------- Drag ----------
+// The avatar never moves inside the page. To move it, we move the whole window.
+let windowSize = { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }; // set in createWindow()
 let dragTimer = null;
-
-function windowSize() {
-  return { width: Math.round(WINDOW_WIDTH * zoom), height: Math.round(WINDOW_HEIGHT * zoom) };
-}
 
 function stopDrag() {
   clearInterval(dragTimer);
@@ -121,45 +139,17 @@ ipcMain.on("drag-start", (event) => {
   dragTimer = setInterval(() => {
     if (win.isDestroyed()) return stopDrag();
     const mouse = screen.getCursorScreenPoint();
-    const size = windowSize();
-    // setBounds with the size every time: moving alone can slowly change the size on a scaled display
+    // setBounds with our own size every time: moving alone can slowly change the size on a scaled display
     win.setBounds({
       x: winStart.x + mouse.x - mouseStart.x,
       y: winStart.y + mouse.y - mouseStart.y,
-      width: size.width,
-      height: size.height,
+      width: windowSize.width,
+      height: windowSize.height,
     });
   }, 16); // about 60 times per second
 });
 
 ipcMain.on("drag-end", stopDrag);
-
-// Mouse wheel over the avatar: make the whole window bigger or smaller.
-// The page is zoomed by the same factor, so the avatar, the bubble and the text scale together
-// and the page still sees itself as WINDOW_WIDTH x WINDOW_HEIGHT.
-ipcMain.on("zoom", (event, deltaY) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win || dragTimer) return;
-  const mouse = screen.getCursorScreenPoint();
-  const area = screen.getDisplayNearestPoint(mouse).workArea;
-  const maxZoom = Math.min(area.width / WINDOW_WIDTH, area.height / WINDOW_HEIGHT); // never bigger than the screen
-  const old = win.getBounds();
-
-  // Scrolling up gives a negative deltaY, and that makes the avatar bigger
-  zoom = Math.min(maxZoom, Math.max(MIN_ZOOM, zoom * Math.exp(-(Number(deltaY) || 0) * ZOOM_SPEED)));
-  const size = windowSize();
-
-  // Keep the point under the mouse in place, so the mouse stays on the avatar while you scroll
-  const fx = Math.min(1, Math.max(0, (mouse.x - old.x) / old.width));
-  const fy = Math.min(1, Math.max(0, (mouse.y - old.y) / old.height));
-  win.setBounds({
-    x: Math.round(mouse.x - fx * size.width),
-    y: Math.round(mouse.y - fy * size.height),
-    width: size.width,
-    height: size.height,
-  });
-  win.webContents.setZoomFactor(zoom);
-});
 
 // Chat with Ollama from the main process (this avoids browser CORS problems)
 async function callOllama(messages, withThinkFlag) {
@@ -222,5 +212,32 @@ ipcMain.handle("tts", async (_event, text) => {
     return { ok: true, audio: await res.arrayBuffer() };
   } catch (err) {
     return { ok: false, error: `VoiceStudio TTS failed (${VOICESTUDIO_URL}). ${err.message}` };
+  }
+});
+
+// Speech to text with VoiceStudio (OpenAI-compatible endpoint), also from the main process.
+// The page records the microphone; we upload the recording as a file and get the text back.
+ipcMain.handle("transcribe", async (_event, audio, mimeType) => {
+  try {
+    const form = new FormData();
+    form.append("file", new Blob([audio], { type: mimeType }), "speech.webm");
+    form.append("model", STT_MODEL);
+    if (STT_LANGUAGE !== "auto") form.append("language", STT_LANGUAGE);
+
+    const res = await fetch(`${VOICESTUDIO_URL}/v1/audio/transcriptions`, {
+      method: "POST",
+      body: form, // fetch sets the multipart Content-Type by itself
+      signal: AbortSignal.timeout(STT_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      throw new Error(`VoiceStudio error ${res.status}: ${await res.text()}`);
+    }
+    const data = await res.json();
+    return { ok: true, text: data.text || "" };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Could not turn your speech into text. Is the VoiceStudio app open? (${VOICESTUDIO_URL}) ${err.message}`,
+    };
   }
 });

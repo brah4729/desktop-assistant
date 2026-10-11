@@ -9,6 +9,9 @@ const MODEL_FILE = "./1973449770481441636.vrm"; // your model in this folder
 const TARGET_FPS = 30; // lower = less CPU for the LLM and TTS
 const MOUTH_GAIN = 5; // raise if the mouth barely opens with VoiceStudio audio, lower if it stays wide open
 const GESTURE_BLEND = 0.35; // seconds to move into a gesture and back out of it
+const MIN_ZOOM = 0.5; // smallest avatar when you scroll (1 = normal size). The biggest size is set by the window, see main.js
+const ZOOM_SPEED = 0.001; // how much one step of the mouse wheel resizes the avatar
+const MAX_LISTEN_SECONDS = 30; // the microphone switches off by itself after this time
 // The prompt tells the model it has a body, and which tags move it.
 // If you add a gesture to GESTURES below, describe it here too or the model will never use it.
 const SYSTEM_PROMPT =
@@ -25,17 +28,24 @@ const SYSTEM_PROMPT =
 const canvas = document.getElementById("scene");
 const bubble = document.getElementById("bubble");
 const input = document.getElementById("input");
+const micBtn = document.getElementById("mic");
 const quitBtn = document.getElementById("quit");
 
 // ---------- Three.js scene ----------
+// The avatar is drawn as a picture of STAGE_W x STAGE_H pixels. Zooming stretches or shrinks that picture
+// on the page (see "Avatar size"); the picture itself and the camera never change.
+const STAGE_W = 400;
+const STAGE_H = 640;
+const UI_SPACE = 126; // empty strip under the feet in that picture: the chat bar and a 3-line bubble go there
+
 const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
 renderer.setPixelRatio(1); // keep it cheap on the CPU/iGPU
 renderer.setClearColor(0x000000, 0); // fully transparent background
-renderer.setSize(window.innerWidth, window.innerHeight, false);
+renderer.setSize(STAGE_W, STAGE_H, false); // false = do not touch the size on the page, layoutAvatar() sets it
 
 const scene = new THREE.Scene();
 
-const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
+const camera = new THREE.PerspectiveCamera(30, STAGE_W / STAGE_H, 0.1, 20);
 // Framed so the feet stand just above a 3-line bubble and the hat stays inside the top edge.
 // To reframe: z = closer (smaller) / farther (bigger), y = move the view up / down.
 // Keep the y of lookAt equal to the y of the position, so the camera looks straight ahead.
@@ -164,6 +174,9 @@ const mouse = new THREE.Vector2();
 let lastIgnore = true;
 let overAvatar = false;
 let dragging = false;
+let mouseX = -1; // where the mouse was last seen on the page
+let mouseY = -1;
+let zoomUntil = 0; // the window stays clickable until this time (see the wheel handler)
 
 window.addEventListener("mousemove", (e) => {
   if (dragging) {
@@ -171,26 +184,37 @@ window.addEventListener("mousemove", (e) => {
     if (e.buttons === 0) endDrag(); // the button was released somewhere we did not see it
     return;
   }
+  mouseX = e.clientX;
+  mouseY = e.clientY;
+  updateHover();
+});
 
-  const overUI = !!e.target.closest("#ui");
+// Looks at what is under the mouse and turns click-through on or off.
+function updateHover() {
+  const under = document.elementFromPoint(mouseX, mouseY);
+  const overUI = !!(under && under.closest("#ui"));
   overAvatar = false;
 
   if (vrm && !overUI) {
-    mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
-    overAvatar = raycaster.intersectObject(vrm.scene, true).length > 0;
+    // Mouse position inside the avatar picture, from -1 to 1. The picture does not fill the window.
+    const box = canvas.getBoundingClientRect();
+    mouse.x = ((mouseX - box.left) / box.width) * 2 - 1;
+    mouse.y = -((mouseY - box.top) / box.height) * 2 + 1;
+    if (Math.abs(mouse.x) <= 1 && Math.abs(mouse.y) <= 1) {
+      raycaster.setFromCamera(mouse, camera);
+      overAvatar = raycaster.intersectObject(vrm.scene, true).length > 0;
+    }
   }
 
-  const ignore = !(overUI || overAvatar);
+  const ignore = !(overUI || overAvatar || performance.now() < zoomUntil);
   if (ignore !== lastIgnore) {
     lastIgnore = ignore;
     window.overlay.setIgnore(ignore);
   }
-});
+}
 
-// ---------- Drag to move, mouse wheel to resize ----------
-// The page only reports what the mouse does on the avatar. The main process moves and resizes the window.
+// ---------- Drag to move ----------
+// The page only reports what the mouse does on the avatar. The main process moves the window.
 canvas.addEventListener("pointerdown", (e) => {
   if (e.button !== 0 || !overAvatar) return; // left button on the avatar only
   dragging = true;
@@ -210,12 +234,42 @@ canvas.addEventListener("pointerup", endDrag);
 canvas.addEventListener("pointercancel", endDrag);
 window.addEventListener("blur", endDrag);
 
-canvas.addEventListener(
+// ---------- Avatar size (mouse wheel) ----------
+// Only the avatar picture changes size. The window and the chat bar stay as they are,
+// and the feet stay on the same line, right above the chat bar.
+const ZOOM_GRACE_MS = 400;
+let zoom = 1;
+let zoomTimer = 0;
+
+function layoutAvatar() {
+  const width = STAGE_W * zoom;
+  canvas.style.width = width + "px";
+  canvas.style.height = STAGE_H * zoom + "px";
+  canvas.style.left = "calc(50% - " + width / 2 + "px)"; // centered in the window
+  // The empty strip under the feet scales with the picture, but the chat bar always needs UI_SPACE pixels.
+  // Move the picture down (or up) by the difference, so the feet stay UI_SPACE above the bottom of the window.
+  canvas.style.bottom = UI_SPACE * (1 - zoom) + "px";
+}
+layoutAvatar();
+
+window.addEventListener(
   "wheel",
   (e) => {
-    if (!overAvatar || dragging) return;
+    if (dragging || e.target.closest("#ui")) return; // over the chat bar the wheel scrolls the bubble
+    if (!overAvatar && performance.now() >= zoomUntil) return;
     e.preventDefault(); // stop the browser's own Ctrl + wheel zoom
-    window.overlay.zoom(e.deltaY);
+
+    // The avatar can grow until it reaches the top or the sides of the window
+    const maxZoom = Math.min(window.innerWidth / STAGE_W, (window.innerHeight - UI_SPACE) / (STAGE_H - UI_SPACE));
+    zoom = Math.min(maxZoom, Math.max(MIN_ZOOM, zoom * Math.exp(-e.deltaY * ZOOM_SPEED))); // wheel up = bigger
+    layoutAvatar();
+
+    // A smaller avatar can slip away from under the mouse. Keep the window clickable for a moment,
+    // so the next wheel step still arrives here and does not scroll the app behind us.
+    zoomUntil = performance.now() + ZOOM_GRACE_MS;
+    clearTimeout(zoomTimer);
+    zoomTimer = setTimeout(updateHover, ZOOM_GRACE_MS + 20);
+    updateHover();
   },
   { passive: false }
 );
@@ -362,14 +416,21 @@ function showBubble(text) {
   bubble.textContent = text;
 }
 
-input.addEventListener("keydown", async (e) => {
+input.addEventListener("keydown", (e) => {
   if (e.key !== "Enter" || busy) return;
   const text = input.value.trim();
   if (!text) return;
 
   input.value = "";
+  sendMessage(text, false);
+});
+
+// Sends one message to the LLM, then shows and speaks the answer.
+// heard = true when the text came from the microphone: we show it, so you can see what was understood.
+async function sendMessage(text, heard) {
+  if (busy) return;
   busy = true;
-  showBubble("Thinking...");
+  showBubble(heard ? `Heard: "${text}" Thinking...` : "Thinking...");
   history.push({ role: "user", content: text });
 
   const result = await window.overlay.chat(history);
@@ -405,7 +466,101 @@ input.addEventListener("keydown", async (e) => {
   setExpression(emotion);
   showBubble(reply);
   speak(reply, () => playGesture(gestureName));
+}
+
+// ---------- Push-to-talk (speech to text) ----------
+// Hold the microphone button, speak, release. Or press the talk shortcut once to start and once to stop.
+// The recording goes to VoiceStudio through the main process and comes back as text.
+// From there it takes the same path as typed text: sendMessage().
+const MIN_LISTEN_MS = 400; // shorter than this is a slip of the finger, not speech
+let wantListening = false; // true while the button is held down (or the shortcut switched it on)
+let recorder = null; // the MediaRecorder while it records
+let listenTimer = 0;
+
+async function startListening() {
+  if (wantListening || busy) return;
+  wantListening = true;
+  micBtn.classList.add("listening");
+  speakId++; // drop a voice that is still being made
+  stopSpeaking(); // and stop talking, or the microphone hears the avatar
+
+  // The microphone is opened for each recording and closed after it,
+  // so Windows shows "microphone in use" only while you talk.
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    wantListening = false;
+    micBtn.classList.remove("listening");
+    showBubble(
+      `Could not use the microphone (${err.name}). Check that one is connected and that Windows lets desktop apps use it: ` +
+        "Settings > Privacy & security > Microphone."
+    );
+    return;
+  }
+  if (!wantListening) {
+    // Released before the microphone was ready
+    stream.getTracks().forEach((track) => track.stop());
+    showBubble("Hold the microphone button while you speak.");
+    return;
+  }
+
+  const chunks = [];
+  const started = performance.now();
+  const rec = new MediaRecorder(stream);
+  rec.ondataavailable = (e) => chunks.push(e.data);
+  rec.onstop = () => {
+    stream.getTracks().forEach((track) => track.stop()); // close the microphone
+    recorder = null;
+    handleRecording(new Blob(chunks, { type: rec.mimeType }), performance.now() - started);
+  };
+  recorder = rec;
+  rec.start();
+  listenTimer = setTimeout(stopListening, MAX_LISTEN_SECONDS * 1000);
+  showBubble("Listening...");
+}
+
+function stopListening() {
+  if (!wantListening) return;
+  wantListening = false;
+  micBtn.classList.remove("listening");
+  clearTimeout(listenTimer);
+  if (recorder) recorder.stop(); // this runs rec.onstop above
+}
+
+async function handleRecording(blob, milliseconds) {
+  if (milliseconds < MIN_LISTEN_MS) {
+    showBubble("Hold the microphone button while you speak.");
+    return;
+  }
+
+  busy = true;
+  showBubble("Transcribing...");
+  const result = await window.overlay.transcribe(await blob.arrayBuffer(), blob.type);
+  busy = false;
+
+  if (!result.ok) {
+    showBubble(result.error);
+    return;
+  }
+  const text = result.text.trim();
+  if (!text) {
+    showBubble("I did not hear anything. Try again, a little closer to the microphone.");
+    return;
+  }
+  sendMessage(text, true);
+}
+
+micBtn.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  micBtn.setPointerCapture(e.pointerId); // we still get the release when the mouse slips off the button
+  startListening();
 });
+micBtn.addEventListener("pointerup", stopListening);
+micBtn.addEventListener("pointercancel", stopListening);
+
+// The talk shortcut (see main.js) switches the microphone on and off
+window.overlay.onTalkToggle(() => (wantListening ? stopListening() : startListening()));
 
 // ---------- Render loop (capped FPS) ----------
 const clock = new THREE.Clock();

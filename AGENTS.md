@@ -3,7 +3,7 @@
 Context file for any AI coding agent (or future me) working on this project.
 Read this first. Update it when decisions change.
 
-Last full update: 2026-10-10.
+Last full update: 2026-10-10. Updated 2026-10-11: camera framing, drag, zoom, push-to-talk.
 
 ## What this project is
 
@@ -23,12 +23,14 @@ Goal: everything runs **locally** (no cloud), on a normal laptop with no dedicat
 | Voice output: VoiceStudio TTS with real lip sync | Works |
 | Voice output fallback: Windows `speechSynthesis` | Works (used only when VoiceStudio is not reachable) |
 | Body gestures chosen by the LLM (`[wave]`, `[nod]`, ...) | Works |
-| Voice input (push-to-talk) | Not built yet |
+| Voice input (push-to-talk): hold the mic button, or `Alt+Shift+Space` to start and stop | Works in the scripted test with a fake microphone; **not tried with a real voice yet** |
 | Camera framing (whole avatar visible above the chat bar) | Works |
-| Drag the avatar to move it, mouse wheel on the avatar to resize it | Works in the scripted test; not tried by hand with a real mouse yet |
+| Drag the avatar to move it | Works in the scripted test; not confirmed by hand |
+| Mouse wheel on the avatar resizes only the avatar (chat bar stays fixed) | Works in the scripted test; not confirmed by hand |
 
 Everything marked "Works" was run on the user's machine on 2026-10-10 (see "How to test").
-Camera framing was changed and checked with screenshots on 2026-10-11. Drag and zoom were added and tested the same day.
+Camera framing was changed and checked with screenshots on 2026-10-11. Drag and zoom were added and tested the same day (zoom was reworked once: it first resized the whole window and the chat bar with it).
+Push-to-talk was added and tested on 2026-10-11.
 
 ## About the user (how to help)
 
@@ -45,7 +47,7 @@ Camera framing was changed and checked with screenshots on 2026-10-11. Drag and 
 - CPU: AMD Ryzen 7 8840HS (8 cores / 16 threads). GPU: AMD Radeon 780M, **integrated only, no NVIDIA**.
   So everything AI runs on the **CPU**. Do not assume CUDA.
 - RAM: **16 GB** (15.3 GiB usable). It was 94% full during development, so memory is the tight resource.
-- Display: 1920x1200 at 150% scaling. The 400x640 window is 600x960 real pixels.
+- Display: 1920x1200 at 150% scaling. The window is 540x800 here (810x1200 real pixels); the avatar picture inside it is 400x640 at normal size.
 - Project path: `C:\Users\Asus\Desktop\projects\desktop-assistant`
 - Installed: Node 25, Bun, Ollama (with `qwen3.5:4b`), VoiceStudio 0.5.6 desktop app. `gh` is not installed.
 - Package manager used so far: **Bun** (`bun.lock` exists). npm also works.
@@ -59,17 +61,20 @@ Camera framing was changed and checked with screenshots on 2026-10-11. Drag and 
 | File | Role |
 |---|---|
 | `package.json` | Project config. `npm start` runs `electron .` |
-| `main.js` | Electron main process: transparent / frameless / always-on-top window, click-through toggle, drag and zoom of the window, global quit shortcut, custom `app://` protocol, Ollama chat and VoiceStudio TTS via IPC |
-| `preload.js` | Safe bridge exposing `window.overlay` (`setIgnore`, `chat`, `tts`, `dragStart`, `dragEnd`, `zoom`, `quit`) |
-| `index.html` | Transparent page, chat bar (`#ui`), import map for `three` and `@pixiv/three-vrm` |
-| `renderer.js` | three.js scene, VRM loading, blink / expressions / mouth, body pose and gestures, drag and wheel handlers, system prompt, chat flow, `speak()` and audio playback |
+| `main.js` | Electron main process: transparent / frameless / always-on-top window, click-through toggle, drag of the window, global quit shortcut, global talk shortcut, microphone permission, custom `app://` protocol, Ollama chat, VoiceStudio TTS and STT via IPC |
+| `preload.js` | Safe bridge exposing `window.overlay` (`setIgnore`, `chat`, `tts`, `transcribe`, `onTalkToggle`, `dragStart`, `dragEnd`, `quit`) |
+| `index.html` | Transparent page, chat bar (`#ui`) with text box, mic button and quit button, import map for `three` and `@pixiv/three-vrm` |
+| `renderer.js` | three.js scene, VRM loading, blink / expressions / mouth, body pose and gestures, drag handlers, avatar size (wheel zoom), system prompt, chat flow (`sendMessage()`), `speak()` and audio playback, push-to-talk recording |
 | `AGENTS.md` | This file |
 
 Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modules`, not a CDN).
 
 ## Flow of one message
 
-1. The user presses Enter in `#input` (`renderer.js`).
+0. Voice only: the user holds `#mic` (or presses `Alt+Shift+Space`). `startListening()` records the microphone with `MediaRecorder`.
+   On release, `handleRecording()` calls `window.overlay.transcribe(bytes, mimeType)`; `ipcMain.handle("transcribe")` uploads the
+   recording to VoiceStudio and returns the text. Then `sendMessage(text, true)` continues at step 2.
+1. Typed: the user presses Enter in `#input` (`renderer.js`), which calls `sendMessage(text, false)`.
 2. `window.overlay.chat(history)` goes through `preload.js` to `ipcMain.handle("chat")` in `main.js`, which calls Ollama.
 3. The reply looks like `[happy][wave] Hello there!`. The renderer strips the tags, sets the face expression and shows the text in the bubble.
 4. `speak(reply, onStart)` calls `window.overlay.tts(reply)`. `ipcMain.handle("tts")` asks VoiceStudio for a WAV and returns the bytes.
@@ -98,7 +103,7 @@ Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modu
 - **Expressions on this model**: VRM 0.x has Joy, Angry, Sorrow, Fun. The library renames them to
   `happy`, `angry`, `sad`, `relaxed`. There is **no `surprised`**, so that tag shows a neutral face.
 - **Camera framing** (`renderer.js`, "Three.js scene"): `camera.position.set(0, 0.68, 4.29)`, `lookAt(0, 0.68, 0)`, FOV 30.
-  The camera looks straight ahead (same y for position and target). Measured in the 400x640 window:
+  The camera looks straight ahead (same y for position and target). Measured in the 400x640 avatar picture (the stage, see "Window, stage and zoom"):
   hat top at 7 px, feet at 514 px, and a 3-line bubble starts at 524 px. So the feet are free for replies
   of up to 3 lines; a longer bubble (it grows upward, up to about 6 lines) covers the feet again.
   The avatar is about 21% smaller on screen than before (507 px tall, it was cut off at 640 px).
@@ -114,28 +119,45 @@ Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modu
   - All numbers are written for **VRM 0.x**. `updateBody()` flips x and z when `vrm.meta.metaVersion` is not `"0"`.
     The VRM 0.x path was checked with screenshots; the **VRM 1.0 flip is not tested** (no such model here).
   - To add a gesture: add it to `GESTURES`, then describe its tag in `SYSTEM_PROMPT`, or the model never uses it.
-  - Arms raised higher than about 0.8 rad above horizontal leave the 400 px wide window.
+  - Arms raised higher than about 0.8 rad above horizontal leave the 400 px wide avatar picture.
     (Measured with the old, closer camera. The current framing shows more space around the avatar; the limit was not measured again.)
   - The gesture starts when the voice starts, not when the text appears (a wave should match the spoken "hello").
 - **Autoplay**: `main.js` sets the `autoplay-policy=no-user-gesture-required` switch, so TTS audio can play
-  even when no key press came right before it (needed later for push-to-talk with a global shortcut).
-- **Drag and zoom** (`main.js` section "Drag and zoom", `renderer.js` section "Drag to move, mouse wheel to resize"):
-  the avatar never moves inside the page. The whole window is moved or resized.
-  - **Drag**: `pointerdown` on the avatar (left button, raycast hit) sends `drag-start`. The main process then reads
+  even when no key press came right before it (needed for push-to-talk with the global shortcut).
+- **Window, stage and zoom**:
+  - The **window** is invisible, click-through and has a fixed size: `WINDOW_WIDTH` 540 x `WINDOW_HEIGHT` 820 in `main.js`,
+    height cut to the work area of the screen (800 here). It starts in the bottom right corner and never resizes.
+    It only has to be big enough for the biggest avatar.
+  - The **stage** is the canvas: the avatar is always rendered as a 400x640 picture (`STAGE_W`, `STAGE_H` in `renderer.js`).
+    The camera and the canvas buffer never change. `UI_SPACE` (126) is the empty strip under the feet in that picture.
+  - **Zoom** (`renderer.js`, section "Avatar size"): the `wheel` handler changes `zoom` and `layoutAvatar()` sets the CSS size
+    of the canvas to `STAGE * zoom`, centered, with `bottom = UI_SPACE * (1 - zoom)`. That keeps the feet exactly
+    `UI_SPACE` px above the bottom of the window at every zoom, so the avatar grows upward from its feet.
+    No IPC, no window resize: it is only CSS, so nothing else moves.
+  - The **chat bar** (`#ui`) has a fixed width (384 px), centered at the bottom. Zoom does not touch it.
+  - Limits: `MIN_ZOOM` 0.5; the maximum is where the picture reaches the top or the sides of the window
+    (`min(innerWidth / 400, (innerHeight - 126) / 514)`: 1.31 on this laptop, 1.35 on a taller screen).
+    For a bigger maximum raise `WINDOW_WIDTH` / `WINDOW_HEIGHT`, but the window cannot be bigger than the screen.
+  - A bigger avatar is the same 400x640 picture stretched: no extra rendering cost, a little softer.
+  - **Grace time**: a shrinking avatar can slip away from under the mouse, and with click-through on the next wheel step
+    would scroll the app behind. So after each wheel step the window stays clickable for `ZOOM_GRACE_MS` (400 ms),
+    then `updateHover()` runs again with the last known mouse position.
+  - `updateHover()` converts the mouse position into the canvas rectangle before the raycast, because the canvas
+    no longer fills the window.
+  - The wheel over the chat bar does nothing (the bubble needs it to scroll).
+  - Earlier version (rejected by the user): resize the window and set `webContents.setZoomFactor()` to the same factor.
+    It scaled and moved the chat bar together with the avatar.
+- **Drag** (`main.js` section "Drag", `renderer.js` section "Drag to move"): the avatar never moves inside the page,
+  the whole window moves (the chat bar comes along).
+  - `pointerdown` on the avatar (left button, raycast hit) sends `drag-start`. The main process then reads
     `screen.getCursorScreenPoint()` every 16 ms and moves the window by the distance the mouse travelled.
     It does not use the mouse events of the page, because the page itself moves under the mouse.
     `pointerup`, `pointercancel`, window `blur`, or a `mousemove` with no button pressed sends `drag-end`.
   - While dragging, the `mousemove` handler skips the click-through toggle. Otherwise the mouse-up could go to the app behind.
-  - **Zoom**: `wheel` on the avatar sends `deltaY`. The main process changes `zoom` (`MIN_ZOOM` 0.5 up to the size of the
-    work area of the screen, 1.25 on this laptop), sets the window to `WINDOW_WIDTH * zoom` x `WINDOW_HEIGHT * zoom`
-    and calls `webContents.setZoomFactor(zoom)`. Because the page zoom equals the window scale, the page always sees
-    itself as 400x640: camera framing, chat bar and raycast need no change. The point under the mouse stays in place.
-  - The canvas buffer stays 400x640 at every zoom, so a bigger avatar costs no extra rendering but is a little softer.
-  - Every `setBounds` call sends the full size computed from `zoom`. Moving alone can change the window size on a
-    display with 150% scaling. `getBounds()` can report 1 px more than what was set (seen: 501x800, 200x321).
-  - `did-finish-load` sets the zoom factor again, in case Chromium remembers a page zoom from an earlier run.
-  - Position and size are **not saved**: every start is 400x640 in the bottom right corner.
-  - The wheel over the chat bar does nothing (the bubble needs it to scroll).
+  - Every `setBounds` call sends our own stored size (`windowSize`). Moving alone can change the window size on a
+    display with 150% scaling, and `getBounds()` can report 1 px more than what was set.
+  - `did-finish-load` sets the page zoom factor to 1, in case Chromium remembers a page zoom from an earlier run.
+  - Position and avatar size are **not saved**: every start is the bottom right corner at zoom 1.
 - **Emergency quit**: `Ctrl+Shift+Q` (global shortcut) and the red X button, because the window has no title bar.
 
 ## Voice output (TTS)
@@ -177,31 +199,58 @@ Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modu
   Indonesian (`TTS_LANGUAGE="id"`, OmniVoice supports it; the system prompt must also ask for Indonesian).
 - License: VoiceStudio is AGPL-3.0, models have their own licenses. We only call its HTTP API.
 
-## Voice input (speech to text): PLANNED, not built yet
+## Voice input (speech to text, push-to-talk)
 
-Goal: replace the text box with push-to-talk (hold a key or button, speak, release).
+Built on 2026-10-11. The text box stays as a second way to talk (no microphone, or VoiceStudio not running).
 
-Findings that shape the design:
+### How to use
 
-- Do **not** use the browser `SpeechRecognition` API. It generally does not work in Electron (no Google speech keys),
-  and it is cloud-based anyway.
-- VoiceStudio's local speech service (from `docs/speech-platform.md`; the discovery URL answered on this machine,
-  the transcription endpoints are **not tested yet**):
-  - Batch, OpenAI-compatible: `POST http://127.0.0.1:3900/v1/audio/transcriptions` (send an audio file, multipart).
-  - Live streaming: `ws://127.0.0.1:3900/v1/audio/transcriptions/stream`
-    - sends binary WebM/Opus frames by default; raw 16-bit mono PCM with `?pcm=1&sr=16000`;
-    - finish with `{"type":"input_audio.end"}`;
-    - replies with `{"type":"partial","text":...}` and `{"type":"final","text":...}`.
-  - Loopback (`127.0.0.1`) needs no credentials.
-  - Discovery: `GET http://127.0.0.1:3900/.well-known/voicestudio-speech`.
-  - Requires the VoiceStudio desktop app to be running. It needs an ASR model; check that the Fast pack installed one.
-- Planned approach (simplest first): in the renderer, record the mic with `MediaRecorder` while the key is held,
-  send the audio to the main process over IPC, and POST it to `/v1/audio/transcriptions` from the main process
-  (avoids CORS, like Ollama). Put the transcript through the same chat flow as typed text.
-  Upgrade to the WebSocket streaming endpoint later if latency matters.
-- Needs mic permission handling in Electron (`session.setPermissionRequestHandler`).
-- Keep the text box as a fallback (useful when no mic or when VoiceStudio is not running).
-- Show clear status in the bubble: "Listening...", "Transcribing...", and a helpful error if VoiceStudio is not reachable.
+- **Hold** the microphone button in the chat bar, speak, release.
+- Or press **`Alt+Shift+Space`** from any app: once to start, once more to stop. The window does not need focus.
+- The bubble shows `Listening...`, then `Transcribing...`, then `Heard: "..." Thinking...`, then the reply.
+- The button is red while the microphone is on.
+
+### How it works
+
+- Engine: VoiceStudio batch endpoint `POST http://127.0.0.1:3900/v1/audio/transcriptions` (OpenAI-compatible, multipart form).
+  Fields we send: `file` (the recording), `model`, `language`. The reply is `{ "text": "..." }`.
+  Other fields it accepts: `prompt`, `response_format` (json, text, verbose_json, srt, vtt), `temperature`. `stream` is not supported.
+- `model`: `"whisper-1"` means "the speech recognition engine that is active in VoiceStudio".
+  On this machine that is **faster-whisper** with **`Systran/faster-whisper-base`** (148 MB, installed, CPU).
+  `GET /engines/asr` shows the active engine and model, `GET /models` shows which models are installed.
+- Recording (`renderer.js`, section "Push-to-talk"): `getUserMedia({ audio: true })` + `MediaRecorder`, default format
+  `audio/webm;codecs=opus`. VoiceStudio accepts that file as it is (tested), so there is no conversion. About 15 KB per second.
+- The microphone is **opened for each recording and closed after it** (`track.stop()`), so Windows shows
+  "microphone in use" only while the user talks. Cost: a short delay before `Listening...` appears.
+- `wantListening` is the one flag for "the user wants the microphone on". It handles a release that comes before
+  the microphone is ready. Recordings shorter than `MIN_LISTEN_MS` (400 ms) are not sent.
+- Starting to listen stops the avatar's voice (`speakId++`, `stopSpeaking()`), so the microphone does not record the avatar.
+- `busy` is true while transcribing and while the LLM answers. During that time the button, the shortcut and Enter do nothing.
+- The microphone switches off by itself after `MAX_LISTEN_SECONDS` (30), in case the shortcut was left on.
+- The upload happens in the main process (`ipcMain.handle("transcribe")`), like Ollama and TTS, to avoid CORS.
+- **Global shortcut is a toggle, not hold-to-talk**: Electron's `globalShortcut` reports only the key press, never the release.
+  `TALK_SHORTCUT` in `main.js` is `Alt+Shift+Space`. `Ctrl+Shift+Space` and `Ctrl+Alt+T` were refused on this machine
+  (another app holds them). If the registration fails, `main.js` prints a warning in the terminal.
+  The hint text on the button in `index.html` names the shortcut too: change both.
+- **Microphone permission**: `session.defaultSession.setPermissionRequestHandler` allows `media` without video and refuses
+  every other permission. Windows must also allow it: Settings > Privacy & security > Microphone > "Let desktop apps access
+  your microphone". On 2026-10-11 it was allowed, and the laptop has "Microphone Array (Realtek(R) Audio)".
+- Do **not** use the browser `SpeechRecognition` API: it generally does not work in Electron (no Google speech keys) and is cloud-based.
+- Settings in `main.js` (or env vars): `STT_MODEL`, `STT_LANGUAGE`, `STT_TIMEOUT_MS` (60 s), `TALK_SHORTCUT`.
+  `STT_LANGUAGE` is `"en"` by default; `"auto"` lets the engine guess (less reliable on short recordings with the base model).
+
+### Measured (faster-whisper base, CPU)
+
+- 3.6 s for the first call (it loads the model), then 1.7 to 2.6 s for 4 to 6 s of speech.
+- A clear synthetic voice was transcribed without mistakes. A real voice with room noise is not tested.
+
+### Not done / ideas
+
+- Live streaming: `ws://127.0.0.1:3900/v1/audio/transcriptions/stream` (binary WebM/Opus frames, or raw 16-bit mono PCM with
+  `?pcm=1&sr=16000`; finish with `{"type":"input_audio.end"}`; replies `partial` and `final`). Not tested. Use it if the wait matters.
+- A bigger model (`Systran/faster-whisper-small`, 0.5 GB) if base makes too many mistakes. Install it in VoiceStudio.
+- Indonesian: `STT_LANGUAGE="id"`, together with `TTS_LANGUAGE="id"` and a system prompt that asks for Indonesian.
+- Whisper models can invent a short sentence (for example "Thank you.") when the recording is silent. There is no filter for that.
 
 ## Resource budget (16 GB RAM)
 
@@ -247,7 +296,14 @@ The app can be started and driven from a script, without the user:
    and set `VOICESTUDIO_URL` to it. The same trick works for the LLM: a fake server on `OLLAMA_URL` that answers
    `POST /api/chat` with `{"message":{"content":"[neutral][wave] Test."}}` triggers any gesture on demand.
    A silent WAV keeps the test quiet.
-4. Quit with `window.overlay.quit()`.
+4. To test push-to-talk without a microphone and without talking, start the app with a fake microphone that plays a WAV in a loop:
+   `--use-fake-device-for-media-stream --use-file-for-fake-audio-capture=C:\path\to\speech.wav`.
+   Make the WAV with VoiceStudio TTS (`POST /v1/audio/speech`). Hold the button with `Input.dispatchMouseEvent`
+   (`mousePressed` on `#mic`, wait, `mouseReleased`). The shortcut cannot be pressed from a script; send its message from the
+   main-process inspector instead: `BrowserWindow.getAllWindows()[0].webContents.send("talk-toggle")`.
+   A proxy that fakes `/api/chat` and `/v1/audio/speech` but forwards `/v1/audio/transcriptions` to port 3900 tests the real
+   speech-to-text without loading the LLM and without sound.
+5. Quit with `window.overlay.quit()`.
 
 Things to know: module variables in `renderer.js` (`speak`, `vrm`, ...) are not reachable from `Runtime.evaluate`,
 and a real test plays sound on the user's speakers.
@@ -266,17 +322,19 @@ and a real test plays sound on the user's speakers.
 - The folder check in the `app://` handler uses `startsWith(__dirname)`, which would also accept a sibling folder
   whose name starts with `desktop-assistant`. Low risk for a local app.
 - `package.json` has no `"trustedDependencies": ["electron"]` (see "Environment").
-- Drag and zoom: the window can be dragged partly off the screen, text gets small below about 0.7 zoom,
-  and the avatar can only grow to 1.25 on this screen (the window cannot be bigger than the screen).
+- Drag and zoom: the window can be dragged partly off the screen, and the avatar can only grow to 1.31 on this screen.
+  The invisible window is 540x800 even when the avatar is small (it is click-through, so apps behind still work).
+  Gestures are cut at the edge of the avatar picture, not at the edge of the window.
+- Push-to-talk was tested with a fake microphone only. Not tested: a real voice, a refused microphone, no microphone at all.
+  If the default recording device in Windows is not the real microphone (VB-Audio Virtual Cable is installed here), the recording is silent.
 - Clicking the chat bar steals keyboard focus from the previously active app.
 - Some fullscreen apps and games can still cover an always-on-top window.
 - `speechSynthesis` voices (fallback only) vary by Windows install; Indonesian voice may be missing.
 
 ## Roadmap
 
-Done: text chat, arms, VoiceStudio TTS with audio-driven lip sync, LLM-chosen body gestures, camera framing, drag and zoom.
+Done: text chat, arms, VoiceStudio TTS with audio-driven lip sync, LLM-chosen body gestures, camera framing, drag and zoom, push-to-talk voice input.
 
-1. Add push-to-talk voice input via VoiceStudio STT (see "Voice input").
-2. Sentence-by-sentence streaming (speak sentence 1 while the LLM writes the rest).
-3. Optional: custom voice profile, Indonesian, remember position and size between starts, idle animations, tray icon,
+1. Sentence-by-sentence streaming (speak sentence 1 while the LLM writes the rest).
+2. Optional: live transcription over the WebSocket endpoint, Indonesian, remember position and size between starts, idle animations, tray icon,
    switch to Tauri to cut RAM.
