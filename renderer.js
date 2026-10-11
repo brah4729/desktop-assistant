@@ -36,8 +36,11 @@ renderer.setSize(window.innerWidth, window.innerHeight, false);
 const scene = new THREE.Scene();
 
 const camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 0.1, 20);
-camera.position.set(0, 1.0, 3.4); // move up/down (y) or closer/farther (z) to reframe
-camera.lookAt(0, 0.9, 0);
+// Framed so the feet stand just above a 3-line bubble and the hat stays inside the top edge.
+// To reframe: z = closer (smaller) / farther (bigger), y = move the view up / down.
+// Keep the y of lookAt equal to the y of the position, so the camera looks straight ahead.
+camera.position.set(0, 0.68, 4.29);
+camera.lookAt(0, 0.68, 0);
 
 scene.add(new THREE.AmbientLight(0xffffff, 0.9));
 const sun = new THREE.DirectionalLight(0xffffff, 1.4);
@@ -159,10 +162,18 @@ function updateBody() {
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 let lastIgnore = true;
+let overAvatar = false;
+let dragging = false;
 
 window.addEventListener("mousemove", (e) => {
+  if (dragging) {
+    // Keep the window clickable for the whole drag, or the mouse-up would go to the app behind us.
+    if (e.buttons === 0) endDrag(); // the button was released somewhere we did not see it
+    return;
+  }
+
   const overUI = !!e.target.closest("#ui");
-  let overAvatar = false;
+  overAvatar = false;
 
   if (vrm && !overUI) {
     mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
@@ -177,6 +188,37 @@ window.addEventListener("mousemove", (e) => {
     window.overlay.setIgnore(ignore);
   }
 });
+
+// ---------- Drag to move, mouse wheel to resize ----------
+// The page only reports what the mouse does on the avatar. The main process moves and resizes the window.
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0 || !overAvatar) return; // left button on the avatar only
+  dragging = true;
+  canvas.setPointerCapture(e.pointerId); // we still get the mouse-up when the mouse is faster than the window
+  canvas.style.cursor = "grabbing";
+  window.overlay.dragStart();
+});
+
+function endDrag() {
+  if (!dragging) return;
+  dragging = false;
+  canvas.style.cursor = "";
+  window.overlay.dragEnd();
+}
+
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+window.addEventListener("blur", endDrag);
+
+canvas.addEventListener(
+  "wheel",
+  (e) => {
+    if (!overAvatar || dragging) return;
+    e.preventDefault(); // stop the browser's own Ctrl + wheel zoom
+    window.overlay.zoom(e.deltaY);
+  },
+  { passive: false }
+);
 
 quitBtn.addEventListener("click", () => window.overlay.quit());
 

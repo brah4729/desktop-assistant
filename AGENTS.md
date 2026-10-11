@@ -24,9 +24,11 @@ Goal: everything runs **locally** (no cloud), on a normal laptop with no dedicat
 | Voice output fallback: Windows `speechSynthesis` | Works (used only when VoiceStudio is not reachable) |
 | Body gestures chosen by the LLM (`[wave]`, `[nod]`, ...) | Works |
 | Voice input (push-to-talk) | Not built yet |
-| Camera framing | Needs adjusting (chat bar covers the feet) |
+| Camera framing (whole avatar visible above the chat bar) | Works |
+| Drag the avatar to move it, mouse wheel on the avatar to resize it | Works in the scripted test; not tried by hand with a real mouse yet |
 
 Everything marked "Works" was run on the user's machine on 2026-10-10 (see "How to test").
+Camera framing was changed and checked with screenshots on 2026-10-11. Drag and zoom were added and tested the same day.
 
 ## About the user (how to help)
 
@@ -57,10 +59,10 @@ Everything marked "Works" was run on the user's machine on 2026-10-10 (see "How 
 | File | Role |
 |---|---|
 | `package.json` | Project config. `npm start` runs `electron .` |
-| `main.js` | Electron main process: transparent / frameless / always-on-top window, click-through toggle, global quit shortcut, custom `app://` protocol, Ollama chat and VoiceStudio TTS via IPC |
-| `preload.js` | Safe bridge exposing `window.overlay` (`setIgnore`, `chat`, `tts`, `quit`) |
+| `main.js` | Electron main process: transparent / frameless / always-on-top window, click-through toggle, drag and zoom of the window, global quit shortcut, custom `app://` protocol, Ollama chat and VoiceStudio TTS via IPC |
+| `preload.js` | Safe bridge exposing `window.overlay` (`setIgnore`, `chat`, `tts`, `dragStart`, `dragEnd`, `zoom`, `quit`) |
 | `index.html` | Transparent page, chat bar (`#ui`), import map for `three` and `@pixiv/three-vrm` |
-| `renderer.js` | three.js scene, VRM loading, blink / expressions / mouth, body pose and gestures, system prompt, chat flow, `speak()` and audio playback |
+| `renderer.js` | three.js scene, VRM loading, blink / expressions / mouth, body pose and gestures, drag and wheel handlers, system prompt, chat flow, `speak()` and audio playback |
 | `AGENTS.md` | This file |
 
 Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modules`, not a CDN).
@@ -95,6 +97,12 @@ Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modu
   The emotion maps to a VRM expression (resets after ~6 s).
 - **Expressions on this model**: VRM 0.x has Joy, Angry, Sorrow, Fun. The library renames them to
   `happy`, `angry`, `sad`, `relaxed`. There is **no `surprised`**, so that tag shows a neutral face.
+- **Camera framing** (`renderer.js`, "Three.js scene"): `camera.position.set(0, 0.68, 4.29)`, `lookAt(0, 0.68, 0)`, FOV 30.
+  The camera looks straight ahead (same y for position and target). Measured in the 400x640 window:
+  hat top at 7 px, feet at 514 px, and a 3-line bubble starts at 524 px. So the feet are free for replies
+  of up to 3 lines; a longer bubble (it grows upward, up to about 6 lines) covers the feet again.
+  The avatar is about 21% smaller on screen than before (507 px tall, it was cut off at 640 px).
+  A different model with another height needs new numbers.
 - **Performance on CPU**: render capped at 30 FPS, `setPixelRatio(1)`, chat history trimmed to the last few turns.
 - **Body pose and gestures** (`renderer.js`, section "Body pose and gestures"):
   - `REST_POSE` is how the avatar stands. VRM loads in T-pose, so it lowers the upper arms (`left +1.2`, `right -1.2` on z).
@@ -107,9 +115,27 @@ Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modu
     The VRM 0.x path was checked with screenshots; the **VRM 1.0 flip is not tested** (no such model here).
   - To add a gesture: add it to `GESTURES`, then describe its tag in `SYSTEM_PROMPT`, or the model never uses it.
   - Arms raised higher than about 0.8 rad above horizontal leave the 400 px wide window.
+    (Measured with the old, closer camera. The current framing shows more space around the avatar; the limit was not measured again.)
   - The gesture starts when the voice starts, not when the text appears (a wave should match the spoken "hello").
 - **Autoplay**: `main.js` sets the `autoplay-policy=no-user-gesture-required` switch, so TTS audio can play
   even when no key press came right before it (needed later for push-to-talk with a global shortcut).
+- **Drag and zoom** (`main.js` section "Drag and zoom", `renderer.js` section "Drag to move, mouse wheel to resize"):
+  the avatar never moves inside the page. The whole window is moved or resized.
+  - **Drag**: `pointerdown` on the avatar (left button, raycast hit) sends `drag-start`. The main process then reads
+    `screen.getCursorScreenPoint()` every 16 ms and moves the window by the distance the mouse travelled.
+    It does not use the mouse events of the page, because the page itself moves under the mouse.
+    `pointerup`, `pointercancel`, window `blur`, or a `mousemove` with no button pressed sends `drag-end`.
+  - While dragging, the `mousemove` handler skips the click-through toggle. Otherwise the mouse-up could go to the app behind.
+  - **Zoom**: `wheel` on the avatar sends `deltaY`. The main process changes `zoom` (`MIN_ZOOM` 0.5 up to the size of the
+    work area of the screen, 1.25 on this laptop), sets the window to `WINDOW_WIDTH * zoom` x `WINDOW_HEIGHT * zoom`
+    and calls `webContents.setZoomFactor(zoom)`. Because the page zoom equals the window scale, the page always sees
+    itself as 400x640: camera framing, chat bar and raycast need no change. The point under the mouse stays in place.
+  - The canvas buffer stays 400x640 at every zoom, so a bigger avatar costs no extra rendering but is a little softer.
+  - Every `setBounds` call sends the full size computed from `zoom`. Moving alone can change the window size on a
+    display with 150% scaling. `getBounds()` can report 1 px more than what was set (seen: 501x800, 200x321).
+  - `did-finish-load` sets the zoom factor again, in case Chromium remembers a page zoom from an earlier run.
+  - Position and size are **not saved**: every start is 400x640 in the bottom right corner.
+  - The wheel over the chat bar does nothing (the bubble needs it to scroll).
 - **Emergency quit**: `Ctrl+Shift+Q` (global shortcut) and the red X button, because the window has no title bar.
 
 ## Voice output (TTS)
@@ -210,7 +236,13 @@ The app can be started and driven from a script, without the user:
    - `Runtime.evaluate` to set `#input` and dispatch an Enter `keydown` (this runs the real chat flow);
    - `Page.captureScreenshot` to look at the avatar (arms, mouth, expression);
    - `WebAudio.enable` and the `WebAudio.audioNodeCreated` event (`AudioBufferSource`) to see when TTS playback starts;
-   - `Runtime.consoleAPICalled` to collect warnings and errors.
+   - `Runtime.consoleAPICalled` to collect warnings and errors;
+   - `Input.dispatchMouseEvent` for mouse buttons and the wheel (`mouseMoved` onto the avatar first, so click-through is off).
+   To read the real window bounds, also start with `--inspect=9334` (put it before the `.`), open the WebSocket from
+   `http://127.0.0.1:9334/json` and evaluate `process.mainModule.require("electron").BrowserWindow.getAllWindows()[0].getBounds()`.
+   Drag needs the **real** cursor to move, because the main process reads it. PowerShell can move it without clicking:
+   `[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(x, y)` (same units as Electron on this machine).
+   The user moving the mouse during such a test changes the result.
 3. To test without VoiceStudio, start a small HTTP server that answers `POST /v1/audio/speech` with a WAV
    and set `VOICESTUDIO_URL` to it. The same trick works for the LLM: a fake server on `OLLAMA_URL` that answers
    `POST /api/chat` with `{"message":{"content":"[neutral][wave] Test."}}` triggers any gesture on demand.
@@ -222,7 +254,7 @@ and a real test plays sound on the user's speakers.
 
 ## Known issues / unverified
 
-- The chat bar covers the avatar's feet. Camera framing (`camera.position` / `lookAt` in `renderer.js`) needs adjusting.
+- A bubble longer than 3 lines covers the avatar's feet (see "Camera framing"). Long error messages do this.
 - The `[surprised]` tag shows a neutral face (see "Expressions on this model"). Option: use `relaxed` instead.
 - `qwen3.5:4b` follows the tag format well, but sometimes adds a gesture that does not fit
   (for example `[wave]` on a normal answer). Tune the wording in `SYSTEM_PROMPT` if that gets annoying.
@@ -234,16 +266,17 @@ and a real test plays sound on the user's speakers.
 - The folder check in the `app://` handler uses `startsWith(__dirname)`, which would also accept a sibling folder
   whose name starts with `desktop-assistant`. Low risk for a local app.
 - `package.json` has no `"trustedDependencies": ["electron"]` (see "Environment").
+- Drag and zoom: the window can be dragged partly off the screen, text gets small below about 0.7 zoom,
+  and the avatar can only grow to 1.25 on this screen (the window cannot be bigger than the screen).
 - Clicking the chat bar steals keyboard focus from the previously active app.
 - Some fullscreen apps and games can still cover an always-on-top window.
 - `speechSynthesis` voices (fallback only) vary by Windows install; Indonesian voice may be missing.
 
 ## Roadmap
 
-Done: text chat, arms, VoiceStudio TTS with audio-driven lip sync, LLM-chosen body gestures.
+Done: text chat, arms, VoiceStudio TTS with audio-driven lip sync, LLM-chosen body gestures, camera framing, drag and zoom.
 
-1. Fix camera framing.
-2. Add push-to-talk voice input via VoiceStudio STT (see "Voice input").
-3. Sentence-by-sentence streaming (speak sentence 1 while the LLM writes the rest).
-4. Optional: custom voice profile, Indonesian, drag to move the window, idle animations, tray icon,
+1. Add push-to-talk voice input via VoiceStudio STT (see "Voice input").
+2. Sentence-by-sentence streaming (speak sentence 1 while the LLM writes the rest).
+3. Optional: custom voice profile, Indonesian, remember position and size between starts, idle animations, tray icon,
    switch to Tauri to cut RAM.

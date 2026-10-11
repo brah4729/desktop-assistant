@@ -15,6 +15,8 @@ const TTS_LANGUAGE = process.env.TTS_LANGUAGE || ""; // e.g. "en" or "id"; empty
 const TTS_TIMEOUT_MS = 120000; // CPU speech can be slow, and the first call also loads the model
 const WINDOW_WIDTH = 400;
 const WINDOW_HEIGHT = 640;
+const MIN_ZOOM = 0.5; // smallest size when you scroll (1 = the window size above). Smaller makes the text unreadable
+const ZOOM_SPEED = 0.001; // how much one step of the mouse wheel resizes the avatar
 // ---------------------------------------------
 
 // Let the page play the TTS audio even when no key or click came right before it
@@ -56,6 +58,9 @@ function createWindow() {
   // Start click-through; the page turns this off while the mouse is over the avatar or the UI
   win.setIgnoreMouseEvents(true, { forward: true });
 
+  // Chromium can remember the page zoom of an earlier run, so set ours again on every load
+  win.webContents.on("did-finish-load", () => win.webContents.setZoomFactor(zoom));
+
   win.loadURL("app://local/index.html");
 }
 
@@ -89,6 +94,72 @@ ipcMain.on("set-ignore", (event, ignore) => {
 });
 
 ipcMain.on("quit", () => app.quit());
+
+// ---------- Drag and zoom ----------
+// The avatar never moves inside the page. To move or resize it, we move or resize the whole window.
+let zoom = 1; // 1 = WINDOW_WIDTH x WINDOW_HEIGHT
+let dragTimer = null;
+
+function windowSize() {
+  return { width: Math.round(WINDOW_WIDTH * zoom), height: Math.round(WINDOW_HEIGHT * zoom) };
+}
+
+function stopDrag() {
+  clearInterval(dragTimer);
+  dragTimer = null;
+}
+
+// While the mouse button is held down on the avatar, the window follows the mouse.
+// We ask the system where the mouse is, instead of using the mouse events of the page,
+// because the page itself moves under the mouse.
+ipcMain.on("drag-start", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || dragTimer) return;
+  const mouseStart = screen.getCursorScreenPoint();
+  const winStart = win.getBounds();
+
+  dragTimer = setInterval(() => {
+    if (win.isDestroyed()) return stopDrag();
+    const mouse = screen.getCursorScreenPoint();
+    const size = windowSize();
+    // setBounds with the size every time: moving alone can slowly change the size on a scaled display
+    win.setBounds({
+      x: winStart.x + mouse.x - mouseStart.x,
+      y: winStart.y + mouse.y - mouseStart.y,
+      width: size.width,
+      height: size.height,
+    });
+  }, 16); // about 60 times per second
+});
+
+ipcMain.on("drag-end", stopDrag);
+
+// Mouse wheel over the avatar: make the whole window bigger or smaller.
+// The page is zoomed by the same factor, so the avatar, the bubble and the text scale together
+// and the page still sees itself as WINDOW_WIDTH x WINDOW_HEIGHT.
+ipcMain.on("zoom", (event, deltaY) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || dragTimer) return;
+  const mouse = screen.getCursorScreenPoint();
+  const area = screen.getDisplayNearestPoint(mouse).workArea;
+  const maxZoom = Math.min(area.width / WINDOW_WIDTH, area.height / WINDOW_HEIGHT); // never bigger than the screen
+  const old = win.getBounds();
+
+  // Scrolling up gives a negative deltaY, and that makes the avatar bigger
+  zoom = Math.min(maxZoom, Math.max(MIN_ZOOM, zoom * Math.exp(-(Number(deltaY) || 0) * ZOOM_SPEED)));
+  const size = windowSize();
+
+  // Keep the point under the mouse in place, so the mouse stays on the avatar while you scroll
+  const fx = Math.min(1, Math.max(0, (mouse.x - old.x) / old.width));
+  const fy = Math.min(1, Math.max(0, (mouse.y - old.y) / old.height));
+  win.setBounds({
+    x: Math.round(mouse.x - fx * size.width),
+    y: Math.round(mouse.y - fy * size.height),
+    width: size.width,
+    height: size.height,
+  });
+  win.webContents.setZoomFactor(zoom);
+});
 
 // Chat with Ollama from the main process (this avoids browser CORS problems)
 async function callOllama(messages, withThinkFlag) {
