@@ -8,10 +8,18 @@ import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 const MODEL_FILE = "./1973449770481441636.vrm"; // your model in this folder
 const TARGET_FPS = 30; // lower = less CPU for the LLM and TTS
 const MOUTH_GAIN = 5; // raise if the mouth barely opens with VoiceStudio audio, lower if it stays wide open
+const GESTURE_BLEND = 0.35; // seconds to move into a gesture and back out of it
+// The prompt tells the model it has a body, and which tags move it.
+// If you add a gesture to GESTURES below, describe it here too or the model will never use it.
 const SYSTEM_PROMPT =
-  "You are a friendly desktop assistant avatar. " +
+  "You are a friendly desktop assistant avatar with a 3D body: a head, a spine, two arms and two hands that you can move. " +
   "Reply in 1 or 2 short sentences. " +
-  "Start every reply with exactly one tag: [happy], [sad], [angry], [surprised] or [neutral].";
+  "Start every reply with exactly one emotion tag: [happy], [sad], [angry], [surprised] or [neutral]. " +
+  "Right after it you can add one gesture tag to move your body: " +
+  "[wave] to greet or say goodbye, [nod] to say yes or agree, [shake] to say no or disagree, " +
+  "[think] when you are unsure, [bow] to thank or apologize, [cheer] to celebrate. " +
+  "Use a gesture only when it fits; most replies need none. " +
+  "Example: [happy][wave] Hello! Nice to see you.";
 // ---------------------------------------------
 
 const canvas = document.getElementById("scene");
@@ -48,20 +56,101 @@ loader.load(
     vrm = gltf.userData.vrm;
     VRMUtils.rotateVRM0(vrm); // makes old VRM 0.x models face the camera (does nothing for 1.0)
     scene.add(vrm.scene);
-    setArmsDown();
     showBubble("Hi! Type something below.");
   },
   undefined,
   (err) => showBubble("Could not load the VRM: " + err)
 );
 
-// VRM models start in a T-pose. Lower the arms so it looks relaxed.
-// If the arms go UP instead of down on your model, flip the signs of the two numbers.
-function setArmsDown() {
-  const left = vrm.humanoid.getNormalizedBoneNode("leftUpperArm");
-  const right = vrm.humanoid.getNormalizedBoneNode("rightUpperArm");
-  if (left) left.rotation.z = 1.2;
-  if (right) right.rotation.z = -1.2;
+// ---------- Body pose and gestures ----------
+// A pose is a list of bones with a rotation [x, y, z] in radians.
+// The numbers are written for VRM 0.x models; updateBody() flips x and z for VRM 1.0.
+// For the right arm: z = up (+) / down (-), x = twist, and y on the lower arm = bend the elbow.
+
+// How the avatar stands when it does nothing. VRM models load in a T-pose, so the arms are lowered here.
+const REST_POSE = {
+  spine: [0, 0, 0],
+  head: [0, 0, 0],
+  leftUpperArm: [0, 0, 1.2],
+  leftLowerArm: [0, 0, 0],
+  rightUpperArm: [0, 0, -1.2],
+  rightLowerArm: [0, 0, 0],
+};
+
+// Each gesture lasts some seconds and returns the pose for the time t (seconds since it started).
+// Bones that a gesture does not mention stay in the rest pose.
+const GESTURES = {
+  wave: {
+    seconds: 2.6,
+    pose: (t) => ({
+      rightUpperArm: [1.57, 0, -0.1], // arm out to the side, twisted so the forearm points up
+      rightLowerArm: [0, 1.6 + 0.4 * Math.sin(t * 10), 0], // the elbow swings the hand left and right
+    }),
+  },
+  nod: {
+    seconds: 1.4,
+    pose: (t) => ({ head: [-0.3 * Math.abs(Math.sin(t * 5)), 0, 0] }),
+  },
+  shake: {
+    seconds: 1.4,
+    pose: (t) => ({ head: [0, 0.4 * Math.sin(t * 9), 0] }),
+  },
+  think: {
+    seconds: 2.5,
+    pose: () => ({ head: [0.12, 0.2, 0.2] }), // look up a little with the head tilted
+  },
+  bow: {
+    seconds: 2.0,
+    pose: () => ({ spine: [-0.5, 0, 0], head: [-0.2, 0, 0] }),
+  },
+  cheer: {
+    seconds: 2.2,
+    pose: (t) => ({
+      leftUpperArm: [0, 0, -0.8 + 0.12 * Math.sin(t * 12)], // not higher, or the hands leave the window
+      rightUpperArm: [0, 0, 0.8 - 0.12 * Math.sin(t * 12)],
+    }),
+  },
+};
+
+let gesture = null;
+let gestureStart = 0;
+
+function playGesture(name) {
+  if (!GESTURES[name]) return;
+  gesture = GESTURES[name];
+  gestureStart = performance.now();
+}
+
+// Runs every frame: blends from the rest pose into the gesture and back.
+function updateBody() {
+  if (!vrm) return;
+
+  let pose = null;
+  let weight = 0; // 0 = rest pose, 1 = full gesture
+  if (gesture) {
+    const t = (performance.now() - gestureStart) / 1000;
+    if (t >= gesture.seconds) {
+      gesture = null;
+    } else {
+      pose = gesture.pose(t);
+      const k = Math.min(1, t / GESTURE_BLEND, (gesture.seconds - t) / GESTURE_BLEND);
+      weight = k * k * (3 - 2 * k); // ease in and out
+    }
+  }
+
+  const flip = vrm.meta.metaVersion === "0" ? 1 : -1; // VRM 1.0 models face the other way
+  for (const name in REST_POSE) {
+    const node = vrm.humanoid.getNormalizedBoneNode(name);
+    if (!node) continue;
+    const rest = REST_POSE[name];
+    const to = (pose && pose[name]) || rest;
+    node.rotation.set(
+      (rest[0] + (to[0] - rest[0]) * weight) * flip,
+      rest[1] + (to[1] - rest[1]) * weight,
+      (rest[2] + (to[2] - rest[2]) * weight) * flip,
+      "ZYX" // twist first, then lift: keeps the arm poses easy to write
+    );
+  }
 }
 
 // ---------- Click-through only where it is empty ----------
@@ -162,7 +251,8 @@ function stopSpeaking() {
   speaking = false;
 }
 
-async function speak(text) {
+// onStart runs at the moment the voice begins, so a gesture can start together with it.
+async function speak(text, onStart) {
   const id = ++speakId;
   stopSpeaking();
 
@@ -171,7 +261,7 @@ async function speak(text) {
 
   if (result.ok) {
     try {
-      await playAudio(result.audio, id);
+      await playAudio(result.audio, id, onStart);
       return;
     } catch (err) {
       console.warn("Could not play the VoiceStudio audio:", err);
@@ -179,10 +269,10 @@ async function speak(text) {
   } else {
     console.warn(result.error);
   }
-  if (id === speakId) speakWithBrowserVoice(text);
+  if (id === speakId) speakWithBrowserVoice(text, onStart);
 }
 
-async function playAudio(arrayBuffer, id) {
+async function playAudio(arrayBuffer, id, onStart) {
   if (!audioCtx) {
     audioCtx = new AudioContext();
     analyser = audioCtx.createAnalyser();
@@ -206,17 +296,22 @@ async function playAudio(arrayBuffer, id) {
   currentSource = source;
   speaking = true;
   source.start();
+  if (onStart) onStart();
 }
 
-function speakWithBrowserVoice(text) {
+function speakWithBrowserVoice(text, onStart) {
   const u = new SpeechSynthesisUtterance(text);
-  u.onstart = () => (speaking = true);
+  u.onstart = () => {
+    speaking = true;
+    if (onStart) onStart();
+  };
   u.onend = () => (speaking = false);
   u.onerror = () => (speaking = false);
   window.speechSynthesis.speak(u);
 }
 
 // ---------- Chat with Ollama ----------
+const EMOTIONS = ["happy", "sad", "angry", "surprised", "neutral"];
 const history = [{ role: "system", content: SYSTEM_PROMPT }];
 let busy = false;
 
@@ -244,21 +339,30 @@ input.addEventListener("keydown", async (e) => {
     return;
   }
 
-  // Reads the leading tag like [happy] and removes it from the text
-  let reply = result.text.trim();
+  // Reads the tags like [happy] and [wave], and removes them from the text.
+  // Small models sometimes put a tag at the end, so we look everywhere, not only at the start.
   let emotion = "neutral";
-  const match = reply.match(/^\[(happy|sad|angry|surprised|neutral)\]\s*/i);
-  if (match) {
-    emotion = match[1].toLowerCase();
-    reply = reply.slice(match[0].length);
-  }
+  let gestureName = null;
+  let foundEmotion = false;
+  const reply = result.text
+    .replace(/\[(\w+)\]\s*/g, (_all, word) => {
+      const tag = word.toLowerCase();
+      if (EMOTIONS.includes(tag) && !foundEmotion) {
+        emotion = tag;
+        foundEmotion = true;
+      } else if (GESTURES[tag] && !gestureName) {
+        gestureName = tag;
+      }
+      return "";
+    })
+    .trim();
 
   history.push({ role: "assistant", content: result.text });
   if (history.length > 13) history.splice(1, 2); // keep the last few turns only (saves RAM and time)
 
   setExpression(emotion);
   showBubble(reply);
-  speak(reply);
+  speak(reply, () => playGesture(gestureName));
 });
 
 // ---------- Render loop (capped FPS) ----------
@@ -272,6 +376,7 @@ function animate() {
   if (acc < frameTime) return;
 
   updateFace(clock.elapsedTime);
+  updateBody();
   if (vrm) vrm.update(acc);
   renderer.render(scene, camera);
   acc = 0;

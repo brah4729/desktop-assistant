@@ -10,7 +10,7 @@ const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen3.5:4b"; // run `ollama list` to see yours
 const VOICESTUDIO_URL = process.env.VOICESTUDIO_URL || "http://127.0.0.1:3900";
 const TTS_MODEL = process.env.TTS_MODEL || "tts-1"; // "tts-1" = the engine that is active in VoiceStudio
-const TTS_VOICE = process.env.TTS_VOICE || "default"; // or a voice profile name / ID from VoiceStudio
+const TTS_VOICE = process.env.TTS_VOICE || "d0510de3"; // voice profile ID from VoiceStudio ; "default" = the engine's own voice
 const TTS_LANGUAGE = process.env.TTS_LANGUAGE || ""; // e.g. "en" or "id"; empty = let the engine decide
 const TTS_TIMEOUT_MS = 120000; // CPU speech can be slow, and the first call also loads the model
 const WINDOW_WIDTH = 400;

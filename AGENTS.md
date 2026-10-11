@@ -22,6 +22,7 @@ Goal: everything runs **locally** (no cloud), on a normal laptop with no dedicat
 | Text chat with Ollama | Works |
 | Voice output: VoiceStudio TTS with real lip sync | Works |
 | Voice output fallback: Windows `speechSynthesis` | Works (used only when VoiceStudio is not reachable) |
+| Body gestures chosen by the LLM (`[wave]`, `[nod]`, ...) | Works |
 | Voice input (push-to-talk) | Not built yet |
 | Camera framing | Needs adjusting (chat bar covers the feet) |
 
@@ -59,7 +60,7 @@ Everything marked "Works" was run on the user's machine on 2026-10-10 (see "How 
 | `main.js` | Electron main process: transparent / frameless / always-on-top window, click-through toggle, global quit shortcut, custom `app://` protocol, Ollama chat and VoiceStudio TTS via IPC |
 | `preload.js` | Safe bridge exposing `window.overlay` (`setIgnore`, `chat`, `tts`, `quit`) |
 | `index.html` | Transparent page, chat bar (`#ui`), import map for `three` and `@pixiv/three-vrm` |
-| `renderer.js` | three.js scene, VRM loading, blink / expressions / mouth, chat flow, `speak()` and audio playback |
+| `renderer.js` | three.js scene, VRM loading, blink / expressions / mouth, body pose and gestures, system prompt, chat flow, `speak()` and audio playback |
 | `AGENTS.md` | This file |
 
 Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modules`, not a CDN).
@@ -68,9 +69,10 @@ Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modu
 
 1. The user presses Enter in `#input` (`renderer.js`).
 2. `window.overlay.chat(history)` goes through `preload.js` to `ipcMain.handle("chat")` in `main.js`, which calls Ollama.
-3. The reply looks like `[happy] Hello there!`. The renderer strips the tag, sets the face expression and shows the text in the bubble.
-4. `speak(reply)` calls `window.overlay.tts(reply)`. `ipcMain.handle("tts")` asks VoiceStudio for a WAV and returns the bytes.
+3. The reply looks like `[happy][wave] Hello there!`. The renderer strips the tags, sets the face expression and shows the text in the bubble.
+4. `speak(reply, onStart)` calls `window.overlay.tts(reply)`. `ipcMain.handle("tts")` asks VoiceStudio for a WAV and returns the bytes.
 5. The renderer plays the WAV through an `AnalyserNode`. `updateFace()` reads the volume and opens the mouth.
+6. At the moment the voice starts, `onStart` calls `playGesture("wave")`, so the body moves together with the voice.
 
 ## How it works (design decisions)
 
@@ -85,14 +87,27 @@ Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modu
 - **Ollama** (`ipcMain.handle("chat")`):
   defaults `OLLAMA_URL=http://localhost:11434`, `OLLAMA_MODEL=qwen3.5:4b` (override with env vars or edit `main.js`).
   Request uses `stream:false`, `keep_alive:"30m"`, `num_ctx:2048`, `think:false` (retried without `think` if the model rejects it).
-- **LLM output format**: system prompt makes the model start with one tag
-  `[happy] [sad] [angry] [surprised] [neutral]`, then 1-2 short sentences.
-  `renderer.js` strips the tag and maps it to a VRM expression (resets after ~6 s).
+- **LLM output format**: the system prompt tells the model it has a 3D body (head, spine, arms, hands).
+  It must start with one emotion tag `[happy] [sad] [angry] [surprised] [neutral]`, may add one gesture tag
+  `[wave] [nod] [shake] [think] [bow] [cheer]`, then 1-2 short sentences. Example: `[happy][wave] Hello!`.
+  `renderer.js` removes **every** `[word]` tag from the text (small models sometimes put a tag at the end),
+  uses the first emotion and the first known gesture, and ignores unknown tags.
+  The emotion maps to a VRM expression (resets after ~6 s).
 - **Expressions on this model**: VRM 0.x has Joy, Angry, Sorrow, Fun. The library renames them to
   `happy`, `angry`, `sad`, `relaxed`. There is **no `surprised`**, so that tag shows a neutral face.
 - **Performance on CPU**: render capped at 30 FPS, `setPixelRatio(1)`, chat history trimmed to the last few turns.
-- **Arms**: VRM loads in T-pose, so `setArmsDown()` rotates the upper arms (`left +1.2`, `right -1.2` on z).
-  Checked with a screenshot. These signs are for **VRM 0.x**; a VRM 1.0 model needs the opposite signs.
+- **Body pose and gestures** (`renderer.js`, section "Body pose and gestures"):
+  - `REST_POSE` is how the avatar stands. VRM loads in T-pose, so it lowers the upper arms (`left +1.2`, `right -1.2` on z).
+  - `GESTURES` holds one entry per gesture: `seconds` and a `pose(t)` function that returns bone rotations `[x, y, z]`
+    in radians for the time `t`. Bones a gesture does not mention stay in the rest pose.
+  - `updateBody()` runs every frame, before `vrm.update()`. It blends rest pose -> gesture -> rest pose
+    (`GESTURE_BLEND` seconds each way) and writes the rotations to the **normalized** humanoid bones.
+  - Rotation order is `"ZYX"` (twist first, then lift), which keeps arm poses easy to write.
+  - All numbers are written for **VRM 0.x**. `updateBody()` flips x and z when `vrm.meta.metaVersion` is not `"0"`.
+    The VRM 0.x path was checked with screenshots; the **VRM 1.0 flip is not tested** (no such model here).
+  - To add a gesture: add it to `GESTURES`, then describe its tag in `SYSTEM_PROMPT`, or the model never uses it.
+  - Arms raised higher than about 0.8 rad above horizontal leave the 400 px wide window.
+  - The gesture starts when the voice starts, not when the text appears (a wave should match the spoken "hello").
 - **Autoplay**: `main.js` sets the `autoplay-policy=no-user-gesture-required` switch, so TTS audio can play
   even when no key press came right before it (needed later for push-to-talk with a global shortcut).
 - **Emergency quit**: `Ctrl+Shift+Q` (global shortcut) and the red X button, because the window has no title bar.
@@ -128,7 +143,8 @@ Dependencies: `electron`, `three`, `@pixiv/three-vrm` (installed from `node_modu
 - The **desktop app must be open** for port 3900 to answer.
 - Model pack: **Fast**. All four packs (Fast / Balanced / Quality / Max) use the same TTS model, OmniVoice.
   The tier only sets the work per sentence (8 / 16 / 32 / 64 steps), so Fast is the right one for CPU.
-- Voices: `default` and one profile, `demo0001` ("VoiceStudio Demo Voice").
+- Voices: `default` and two profiles: `d0510de3` (the user's cloned voice, **used by the app**)
+  and `demo0001` ("VoiceStudio Demo Voice"). `TTS_VOICE` in `main.js` selects one.
 - Measured speed (OmniVoice, CPU): 4.7 to 6.2 s to make 5 to 6 s of speech.
   In the app the voice starts about 4 s after the reply text appears.
 - Ideas not tried yet: KittenTTS (lighter, English only, `TTS_MODEL="kittentts"`), a custom voice profile,
@@ -196,7 +212,9 @@ The app can be started and driven from a script, without the user:
    - `WebAudio.enable` and the `WebAudio.audioNodeCreated` event (`AudioBufferSource`) to see when TTS playback starts;
    - `Runtime.consoleAPICalled` to collect warnings and errors.
 3. To test without VoiceStudio, start a small HTTP server that answers `POST /v1/audio/speech` with a WAV
-   and set `VOICESTUDIO_URL` to it.
+   and set `VOICESTUDIO_URL` to it. The same trick works for the LLM: a fake server on `OLLAMA_URL` that answers
+   `POST /api/chat` with `{"message":{"content":"[neutral][wave] Test."}}` triggers any gesture on demand.
+   A silent WAV keeps the test quiet.
 4. Quit with `window.overlay.quit()`.
 
 Things to know: module variables in `renderer.js` (`speak`, `vrm`, ...) are not reachable from `Runtime.evaluate`,
@@ -206,6 +224,9 @@ and a real test plays sound on the user's speakers.
 
 - The chat bar covers the avatar's feet. Camera framing (`camera.position` / `lookAt` in `renderer.js`) needs adjusting.
 - The `[surprised]` tag shows a neutral face (see "Expressions on this model"). Option: use `relaxed` instead.
+- `qwen3.5:4b` follows the tag format well, but sometimes adds a gesture that does not fit
+  (for example `[wave]` on a normal answer). Tune the wording in `SYSTEM_PROMPT` if that gets annoying.
+- Gestures are simple hand-written rotations: no finger movement, no idle animation, and a new gesture replaces the running one.
 - The voice starts a few seconds after the text. Sentence-by-sentence streaming (roadmap) would shorten the wait.
 - The first TTS call after starting VoiceStudio can be slower (model load). After 120 s the Windows voice is used.
 - `THREE.Clock` is deprecated since three r183 (console warning only). Replace with `THREE.Timer` some day.
@@ -219,7 +240,7 @@ and a real test plays sound on the user's speakers.
 
 ## Roadmap
 
-Done: text chat, arms, VoiceStudio TTS with audio-driven lip sync.
+Done: text chat, arms, VoiceStudio TTS with audio-driven lip sync, LLM-chosen body gestures.
 
 1. Fix camera framing.
 2. Add push-to-talk voice input via VoiceStudio STT (see "Voice input").
